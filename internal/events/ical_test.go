@@ -60,7 +60,7 @@ func TestNormalizeSingleEvent(t *testing.T) {
 	if got.ETag != `"abc123"` {
 		t.Fatalf("unexpected etag: %q", got.ETag)
 	}
-	if got.Source != SourceRadicale {
+	if got.Source != SourceCalDAV {
 		t.Fatalf("unexpected source: %q", got.Source)
 	}
 }

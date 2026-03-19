@@ -8,11 +8,12 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"calendar-api/internal/caldav"
 	"calendar-api/internal/config"
-	"calendar-api/internal/radicale"
+	"calendar-api/internal/service"
 )
 
-func TestRadicaleErrorsMapToBadGateway(t *testing.T) {
+func TestCalDAVErrorsMapToBadGateway(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))
@@ -20,21 +21,22 @@ func TestRadicaleErrorsMapToBadGateway(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := config.Config{
-		RadicaleBaseURL:  upstream.URL,
-		RadicaleUsername: "vince",
-		RadicalePassword: "secret",
-		DefaultCalendar:  "wall",
-		BindAddr:         "127.0.0.1:8090",
-		DefaultTimezone:  "UTC",
+		CalDAVBaseURL:   upstream.URL,
+		CalDAVUsername:  "vince",
+		CalDAVPassword:  "secret",
+		DefaultCalendar: "wall",
+		BindAddr:        "127.0.0.1:8090",
+		DefaultTimezone: "UTC",
 	}
-	client, err := radicale.NewClient(cfg, logger)
+	client, err := caldav.NewClient(cfg, logger)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	server, err := NewServer(cfg, client, logger)
+	app, err := service.New(cfg, client, logger)
 	if err != nil {
-		t.Fatalf("new server: %v", err)
+		t.Fatalf("new service: %v", err)
 	}
+	server := NewServer(app, logger)
 
 	req := httptest.NewRequest(http.MethodGet, "/calendars", nil)
 	rec := httptest.NewRecorder()
@@ -48,7 +50,7 @@ func TestRadicaleErrorsMapToBadGateway(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if body["error"] != "radicale unavailable" {
+	if body["error"] != "caldav unavailable" {
 		t.Fatalf("unexpected error body: %#v", body)
 	}
 }

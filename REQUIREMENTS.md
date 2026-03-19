@@ -2,9 +2,9 @@
 
 ## Goal
 
-Build a small self-hosted calendar API service that sits between AI agents and the existing Radicale CalDAV server.
+Build a small self-hosted calendar API service that sits between AI agents and an existing CalDAV server.
 
-This service must make calendar management simple, safe, and predictable for agents. Radicale remains the source of truth. The new service provides a clean JSON API and hides CalDAV complexity.
+This service must make calendar management simple, safe, and predictable for agents. The upstream CalDAV server remains the source of truth. The new service provides a clean JSON API and hides CalDAV complexity.
 
 Project location:
 
@@ -12,13 +12,13 @@ Project location:
 
 Existing backend:
 
-- Radicale is already running separately
-- Do not replace Radicale
+- A CalDAV server is already running separately
+- Do not replace the upstream server
 - Do not store calendar truth anywhere else in v1
 
 ## Core Principles
 
-- Radicale is the system of record
+- The upstream CalDAV server is the system of record
 - This API is an adapter and agent-safe control layer
 - Keep v1 small and reliable
 - Prefer boring, explicit behavior over cleverness
@@ -62,22 +62,22 @@ Why Go:
 
 ## External Dependency
 
-The service must connect to the existing Radicale server.
+The service must connect to the existing CalDAV server.
 
 Required config:
 
-- `RADICALE_BASE_URL`
-- `RADICALE_USERNAME`
-- `RADICALE_PASSWORD`
+- `CALDAV_BASE_URL`
+- `CALDAV_USERNAME`
+- `CALDAV_PASSWORD`
 - `CALENDAR_DEFAULT_NAME`
 - `API_BIND_ADDR`
 
 Example:
 
-- `RADICALE_BASE_URL=http://127.0.0.1:5232`
-- `RADICALE_USERNAME=vince`
-- `RADICALE_PASSWORD=...`
-- `CALENDAR_DEFAULT_NAME=wall`
+- `CALDAV_BASE_URL=https://caldav.example.com`
+- `CALDAV_USERNAME=you@example.com`
+- `CALDAV_PASSWORD=...`
+- `CALENDAR_DEFAULT_NAME=personal`
 - `API_BIND_ADDR=127.0.0.1:8090`
 
 ## API Design
@@ -91,7 +91,7 @@ All responses must be JSON.
 Response:
 
 - service health
-- Radicale reachability summary
+- CalDAV reachability summary
 
 ### Calendars
 
@@ -230,7 +230,7 @@ Normalized event shape:
   "timezone": "Europe/Paris",
   "location": "",
   "etag": "\"abc123\"",
-  "source": "radicale"
+  "source": "caldav"
 }
 ```
 
@@ -256,7 +256,7 @@ Examples:
 - `calendar not found`
 - `event not found`
 - `invalid time range`
-- `radicale unavailable`
+- `caldav unavailable`
 - `write conflict`
 
 HTTP behavior:
@@ -264,7 +264,7 @@ HTTP behavior:
 - `400` for bad input
 - `404` for missing calendar/event
 - `409` for conflicts
-- `502` when Radicale is unavailable or returns an invalid upstream response
+- `502` when CalDAV is unavailable or returns an invalid upstream response
 
 ## Conflict Handling
 
@@ -279,7 +279,7 @@ For writes:
 - all stored/returned timestamps must be explicit ISO 8601
 - timezone handling must be consistent
 - default timezone should be configurable
-- do not assume floating local times unless Radicale data explicitly requires it
+- do not assume floating local times unless CalDAV data explicitly requires it
 
 ## Logging
 
@@ -289,7 +289,7 @@ Log:
 - method
 - path
 - action result
-- upstream Radicale errors
+- upstream CalDAV errors
 
 Do not log secrets.
 
@@ -300,7 +300,7 @@ V1 can bind only to localhost.
 Recommended:
 
 - bind to `127.0.0.1`
-- keep Radicale credentials server-side only
+- keep CalDAV credentials server-side only
 - if exposed later, add token auth or mTLS
 
 ## Deployment
@@ -326,13 +326,13 @@ Must include tests for:
 - input validation
 - time range validation
 - availability calculation
-- Radicale error mapping
+- CalDAV error mapping
 
 ## Acceptance Criteria
 
 V1 is acceptable when:
 
-- it can list upcoming events from Radicale
+- it can list upcoming events from CalDAV
 - it can create a new event in the configured calendar
 - it can move an event
 - it can delete an event
@@ -344,7 +344,7 @@ V1 is acceptable when:
 ## Implementation Advice
 
 - keep internal modules small
-- make Radicale interaction a clean adapter layer
+- make CalDAV interaction a clean adapter layer
 - keep HTTP handlers thin
 - keep normalization logic separate from transport
 - do not overbuild abstractions
@@ -354,7 +354,7 @@ V1 is acceptable when:
 ```txt
 cmd/calendar-api/main.go
 internal/api/
-internal/radicale/
+internal/caldav/
 internal/events/
 internal/availability/
 internal/config/
@@ -372,4 +372,3 @@ Service name:
 Binary name:
 
 - `calendar-api`
-

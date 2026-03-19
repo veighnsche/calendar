@@ -10,7 +10,7 @@ import (
 	ics "github.com/arran4/golang-ical"
 )
 
-const SourceRadicale = "radicale"
+const SourceCalDAV = "caldav"
 
 func NormalizeCalendarObject(calendarName, objectID string, data []byte, etag string, defaultLoc *time.Location) ([]Event, error) {
 	cal, err := ics.ParseCalendar(bytes.NewReader(data))
@@ -117,7 +117,7 @@ func normalizeVEvent(calendarName, objectID, etag string, vevent *ics.VEvent, de
 		Timezone:    timezone,
 		Location:    propertyValue(vevent.ComponentBase.GetProperty(ics.ComponentPropertyLocation)),
 		ETag:        etag,
-		Source:      SourceRadicale,
+		Source:      SourceCalDAV,
 	}, true, nil
 }
 

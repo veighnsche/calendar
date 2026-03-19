@@ -1,4 +1,4 @@
-package radicale
+package caldav
 
 import (
 	"bytes"
@@ -20,10 +20,10 @@ import (
 )
 
 var (
-	ErrCalendarNotFound    = errors.New("calendar not found")
-	ErrEventNotFound       = errors.New("event not found")
-	ErrRadicaleUnavailable = errors.New("radicale unavailable")
-	ErrWriteConflict       = errors.New("write conflict")
+	ErrCalendarNotFound  = errors.New("calendar not found")
+	ErrEventNotFound     = errors.New("event not found")
+	ErrCalDAVUnavailable = errors.New("caldav unavailable")
+	ErrWriteConflict     = errors.New("write conflict")
 )
 
 type Client struct {
@@ -58,9 +58,9 @@ type ListOptions struct {
 }
 
 func NewClient(cfg config.Config, logger *slog.Logger) (*Client, error) {
-	baseURL, err := url.Parse(cfg.RadicaleBaseURL)
+	baseURL, err := url.Parse(cfg.CalDAVBaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("parse RADICALE_BASE_URL: %w", err)
+		return nil, fmt.Errorf("parse CALDAV_BASE_URL: %w", err)
 	}
 	loc, err := cfg.DefaultLocation()
 	if err != nil {
@@ -68,8 +68,8 @@ func NewClient(cfg config.Config, logger *slog.Logger) (*Client, error) {
 	}
 	return &Client{
 		baseURL:    baseURL,
-		username:   cfg.RadicaleUsername,
-		password:   cfg.RadicalePassword,
+		username:   cfg.CalDAVUsername,
+		password:   cfg.CalDAVPassword,
 		defaultLoc: loc,
 		logger:     logger,
 		httpClient: &http.Client{Timeout: 15 * time.Second},
@@ -91,7 +91,7 @@ func (c *Client) Health(ctx context.Context) (HealthStatus, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusMultiStatus {
-		return HealthStatus{}, c.mapStatus(resp.StatusCode, ErrRadicaleUnavailable)
+		return HealthStatus{}, c.mapStatus(resp.StatusCode, ErrCalDAVUnavailable)
 	}
 	return HealthStatus{
 		Reachable:      true,
@@ -114,15 +114,15 @@ func (c *Client) ListCalendars(ctx context.Context) ([]events.Calendar, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, ErrRadicaleUnavailable
+		return nil, ErrCalDAVUnavailable
 	}
 	if resp.StatusCode != http.StatusMultiStatus {
-		return nil, c.mapStatus(resp.StatusCode, ErrRadicaleUnavailable)
+		return nil, c.mapStatus(resp.StatusCode, ErrCalDAVUnavailable)
 	}
 
 	var result multiStatus
 	if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("%w: invalid XML response", ErrRadicaleUnavailable)
+		return nil, fmt.Errorf("%w: invalid XML response", ErrCalDAVUnavailable)
 	}
 
 	cals := make([]events.Calendar, 0)
@@ -148,7 +148,7 @@ func (c *Client) ListCalendars(ctx context.Context) ([]events.Calendar, error) {
 			Name:        name,
 			DisplayName: displayName,
 			Href:        href,
-			Source:      events.SourceRadicale,
+			Source:      events.SourceCalDAV,
 		})
 	}
 	sort.Slice(cals, func(i, j int) bool { return cals[i].Name < cals[j].Name })
@@ -239,16 +239,16 @@ func (c *Client) GetObject(ctx context.Context, calendarName, id string) (Object
 	case http.StatusNotFound:
 		return Object{}, ErrEventNotFound
 	default:
-		return Object{}, c.mapStatus(resp.StatusCode, ErrRadicaleUnavailable)
+		return Object{}, c.mapStatus(resp.StatusCode, ErrCalDAVUnavailable)
 	}
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return Object{}, fmt.Errorf("%w: read upstream response", ErrRadicaleUnavailable)
+		return Object{}, fmt.Errorf("%w: read upstream response", ErrCalDAVUnavailable)
 	}
 	event, err := events.NormalizeSingleEvent(calendarName, cleanObjectID(id), data, resp.Header.Get("ETag"), c.defaultLoc)
 	if err != nil {
-		return Object{}, fmt.Errorf("%w: invalid calendar data", ErrRadicaleUnavailable)
+		return Object{}, fmt.Errorf("%w: invalid calendar data", ErrCalDAVUnavailable)
 	}
 	return Object{
 		Calendar: calendarName,
@@ -285,7 +285,7 @@ func (c *Client) PutObject(ctx context.Context, calendarName, id string, data []
 	case http.StatusPreconditionFailed, http.StatusConflict:
 		return Object{}, ErrWriteConflict
 	default:
-		return Object{}, c.mapStatus(resp.StatusCode, ErrRadicaleUnavailable)
+		return Object{}, c.mapStatus(resp.StatusCode, ErrCalDAVUnavailable)
 	}
 	return c.GetObject(ctx, calendarName, id)
 }
@@ -313,7 +313,7 @@ func (c *Client) DeleteObject(ctx context.Context, calendarName, id, etag string
 	case http.StatusPreconditionFailed, http.StatusConflict:
 		return ErrWriteConflict
 	default:
-		return c.mapStatus(resp.StatusCode, ErrRadicaleUnavailable)
+		return c.mapStatus(resp.StatusCode, ErrCalDAVUnavailable)
 	}
 }
 
@@ -336,12 +336,12 @@ func (c *Client) calendarQuery(ctx context.Context, opts ListOptions) (multiStat
 	case http.StatusNotFound:
 		return multiStatus{}, ErrCalendarNotFound
 	default:
-		return multiStatus{}, c.mapStatus(resp.StatusCode, ErrRadicaleUnavailable)
+		return multiStatus{}, c.mapStatus(resp.StatusCode, ErrCalDAVUnavailable)
 	}
 
 	var result multiStatus
 	if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return multiStatus{}, fmt.Errorf("%w: invalid XML response", ErrRadicaleUnavailable)
+		return multiStatus{}, fmt.Errorf("%w: invalid XML response", ErrCalDAVUnavailable)
 	}
 	return result, nil
 }
@@ -357,7 +357,7 @@ func (c *Client) decodeEvents(calendarName string, response multiStatus) ([]even
 		id = cleanObjectID(id)
 		normalized, err := events.NormalizeCalendarObject(calendarName, id, []byte(prop.CalendarData), prop.GetETag, c.defaultLoc)
 		if err != nil {
-			return nil, fmt.Errorf("%w: invalid calendar data", ErrRadicaleUnavailable)
+			return nil, fmt.Errorf("%w: invalid calendar data", ErrCalDAVUnavailable)
 		}
 		items = append(items, normalized...)
 	}
@@ -377,11 +377,11 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 	req.SetBasicAuth(c.username, c.password)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		c.logger.Error("radicale request failed", "method", req.Method, "url", req.URL.String(), "error", err)
-		return nil, ErrRadicaleUnavailable
+		c.logger.Error("caldav request failed", "method", req.Method, "url", req.URL.String(), "error", err)
+		return nil, ErrCalDAVUnavailable
 	}
 	if resp.StatusCode >= 500 {
-		c.logger.Error("radicale upstream error", "method", req.Method, "url", req.URL.String(), "status", resp.StatusCode)
+		c.logger.Error("caldav upstream error", "method", req.Method, "url", req.URL.String(), "status", resp.StatusCode)
 	}
 	return resp, nil
 }

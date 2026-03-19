@@ -10,40 +10,27 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
-	"calendar-api/internal/availability"
-	"calendar-api/internal/config"
 	"calendar-api/internal/events"
-	"calendar-api/internal/radicale"
+	"calendar-api/internal/service"
 )
 
 type Server struct {
-	client          *radicale.Client
-	logger          *slog.Logger
-	defaultCalendar string
-	defaultLoc      *time.Location
+	service *service.Service
+	logger  *slog.Logger
 }
 
 type contextKey string
 
 const requestIDKey contextKey = "request_id"
 
-var slugCleaner = regexp.MustCompile(`[^a-z0-9]+`)
-
-func NewServer(cfg config.Config, client *radicale.Client, logger *slog.Logger) (*Server, error) {
-	loc, err := cfg.DefaultLocation()
-	if err != nil {
-		return nil, err
-	}
+func NewServer(app *service.Service, logger *slog.Logger) *Server {
 	return &Server{
-		client:          client,
-		logger:          logger,
-		defaultCalendar: cfg.DefaultCalendar,
-		defaultLoc:      loc,
-	}, nil
+		service: app,
+		logger:  logger,
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -62,30 +49,20 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	status, err := s.client.Health(r.Context())
+	result, err := s.service.Health(r.Context())
+	status := http.StatusOK
 	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"status": "degraded",
-			"radicale": map[string]any{
-				"reachable": false,
-				"error":     errorMessage(err),
-			},
-			"requestId": requestIDFromContext(r.Context()),
-		})
-		return
+		status = http.StatusServiceUnavailable
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status": "ok",
-		"radicale": map[string]any{
-			"reachable":      status.Reachable,
-			"userCollection": status.UserCollection,
-		},
+	writeJSON(w, status, map[string]any{
+		"status":    result.Status,
+		"caldav":    result.CalDAV,
 		"requestId": requestIDFromContext(r.Context()),
 	})
 }
 
 func (s *Server) handleCalendars(w http.ResponseWriter, r *http.Request) {
-	calendars, err := s.client.ListCalendars(r.Context())
+	calendars, err := s.service.ListCalendars(r.Context())
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -102,27 +79,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-
-	var from, to *time.Time
-	fromRaw := strings.TrimSpace(r.URL.Query().Get("from"))
-	toRaw := strings.TrimSpace(r.URL.Query().Get("to"))
-	if fromRaw != "" || toRaw != "" {
-		parsedFrom, parsedTo, err := events.ParseRange(fromRaw, toRaw)
-		if err != nil {
-			s.writeError(w, r, err)
-			return
-		}
-		from = &parsedFrom
-		to = &parsedTo
-	}
-
-	items, err := s.client.ListEvents(r.Context(), radicale.ListOptions{
-		Calendar: s.resolveCalendar(r.URL.Query().Get("calendar")),
-		From:     from,
-		To:       to,
+	items, err := s.service.ListEvents(r.Context(), service.ListEventsParams{
+		Calendar: r.URL.Query().Get("calendar"),
+		From:     r.URL.Query().Get("from"),
+		To:       r.URL.Query().Get("to"),
 		Limit:    limit,
 		Query:    r.URL.Query().Get("q"),
-		Expand:   from != nil && to != nil,
 	})
 	if err != nil {
 		s.writeError(w, r, err)
@@ -141,7 +103,10 @@ func (s *Server) handleUpcoming(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	items, err := s.client.UpcomingEvents(r.Context(), s.resolveCalendar(r.URL.Query().Get("calendar")), limit)
+	items, err := s.service.UpcomingEvents(r.Context(), service.UpcomingEventsParams{
+		Calendar: r.URL.Query().Get("calendar"),
+		Limit:    limit,
+	})
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -153,13 +118,16 @@ func (s *Server) handleUpcoming(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetEvent(w http.ResponseWriter, r *http.Request) {
-	item, err := s.client.GetObject(r.Context(), s.resolveCalendar(r.URL.Query().Get("calendar")), r.PathValue("id"))
+	item, err := s.service.GetEvent(r.Context(), service.GetEventParams{
+		Calendar: r.URL.Query().Get("calendar"),
+		ID:       r.PathValue("id"),
+	})
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"event":     item.Event,
+		"event":     item,
 		"requestId": requestIDFromContext(r.Context()),
 	})
 }
@@ -170,301 +138,124 @@ func (s *Server) handleCreateEvent(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	input, err := events.ValidateCreate(req, s.defaultCalendar, s.defaultLoc)
+	req.DryRun = req.DryRun || queryBool(r, "dryRun")
+	item, err := s.service.CreateEvent(r.Context(), req)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	id, err := newObjectID(input.Title)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
+	status := http.StatusCreated
+	if item.DryRun {
+		status = http.StatusOK
 	}
-	data, err := events.BuildCalendar(id, input, time.Now())
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-
-	dryRun := req.DryRun || queryBool(r, "dryRun")
-	if dryRun {
-		event, err := events.NormalizeSingleEvent(input.Calendar, id, data, "", s.defaultLoc)
-		if err != nil {
-			s.writeError(w, r, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"dryRun":    true,
-			"event":     event,
-			"requestId": requestIDFromContext(r.Context()),
-		})
-		return
-	}
-
-	item, err := s.client.PutObject(r.Context(), input.Calendar, id, data, "", true)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"dryRun":    false,
+	writeJSON(w, status, map[string]any{
+		"dryRun":    item.DryRun,
 		"event":     item.Event,
 		"requestId": requestIDFromContext(r.Context()),
 	})
 }
 
 func (s *Server) handlePatchEvent(w http.ResponseWriter, r *http.Request) {
-	calendar := s.resolveCalendar(r.URL.Query().Get("calendar"))
-	object, err := s.client.GetObject(r.Context(), calendar, r.PathValue("id"))
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-
 	var req events.PatchRequest
 	if err := decodeJSON(r, &req); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	input, err := events.ValidatePatch(object.Event, req, s.defaultLoc)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-
-	data, err := events.PatchCalendar(object.Data, input, time.Now())
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-
-	dryRun := req.DryRun || queryBool(r, "dryRun")
-	if dryRun {
-		event, err := events.NormalizeSingleEvent(calendar, object.ID, data, object.ETag, s.defaultLoc)
-		if err != nil {
-			s.writeError(w, r, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"dryRun":    true,
-			"event":     event,
-			"requestId": requestIDFromContext(r.Context()),
-		})
-		return
-	}
-
-	etag := resolveWriteETag(r.Header.Get("If-Match"), req.ETag)
-	if etag == "" {
-		s.writeError(w, r, errors.New("missing etag"))
-		return
-	}
-
-	item, err := s.client.PutObject(r.Context(), calendar, object.ID, data, etag, false)
+	req.DryRun = req.DryRun || queryBool(r, "dryRun")
+	item, err := s.service.PatchEventWithETag(r.Context(), service.PatchEventParams{
+		Calendar: r.URL.Query().Get("calendar"),
+		ID:       r.PathValue("id"),
+		Body:     req,
+	}, r.Header.Get("If-Match"))
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"dryRun":    false,
+		"dryRun":    item.DryRun,
 		"event":     item.Event,
 		"requestId": requestIDFromContext(r.Context()),
 	})
 }
 
 func (s *Server) handleMoveEvent(w http.ResponseWriter, r *http.Request) {
-	calendar := s.resolveCalendar(r.URL.Query().Get("calendar"))
-	object, err := s.client.GetObject(r.Context(), calendar, r.PathValue("id"))
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-
 	var req events.MoveRequest
 	if err := decodeJSON(r, &req); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	input, targetCalendar, err := events.ValidateMove(object.Event, req, s.defaultLoc)
+	req.DryRun = req.DryRun || queryBool(r, "dryRun")
+	item, err := s.service.MoveEventWithETag(r.Context(), service.MoveEventParams{
+		Calendar: r.URL.Query().Get("calendar"),
+		ID:       r.PathValue("id"),
+		Body:     req,
+	}, r.Header.Get("If-Match"))
 	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-
-	data, err := events.PatchCalendar(object.Data, input, time.Now())
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-
-	dryRun := req.DryRun || queryBool(r, "dryRun")
-	if dryRun {
-		event, err := events.NormalizeSingleEvent(targetCalendar, object.ID, data, object.ETag, s.defaultLoc)
-		if err != nil {
-			s.writeError(w, r, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"dryRun":    true,
-			"event":     event,
-			"requestId": requestIDFromContext(r.Context()),
-		})
-		return
-	}
-
-	etag := resolveWriteETag(r.Header.Get("If-Match"), req.ETag)
-	if etag == "" {
-		s.writeError(w, r, errors.New("missing etag"))
-		return
-	}
-
-	if targetCalendar == calendar {
-		item, err := s.client.PutObject(r.Context(), calendar, object.ID, data, etag, false)
-		if err != nil {
-			s.writeError(w, r, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"dryRun":    false,
-			"event":     item.Event,
-			"requestId": requestIDFromContext(r.Context()),
-		})
-		return
-	}
-
-	item, err := s.client.PutObject(r.Context(), targetCalendar, object.ID, data, "", true)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	if err := s.client.DeleteObject(r.Context(), calendar, object.ID, etag); err != nil {
-		if rollbackErr := s.client.DeleteObject(r.Context(), targetCalendar, object.ID, item.ETag); rollbackErr != nil {
-			s.logger.Error("move rollback failed", "calendar", targetCalendar, "id", object.ID, "error", rollbackErr)
-		}
 		s.writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"dryRun":    false,
+		"dryRun":    item.DryRun,
 		"event":     item.Event,
 		"requestId": requestIDFromContext(r.Context()),
 	})
 }
 
 func (s *Server) handleDeleteEvent(w http.ResponseWriter, r *http.Request) {
-	calendar := s.resolveCalendar(r.URL.Query().Get("calendar"))
-	id := r.PathValue("id")
-	dryRun := queryBool(r, "dryRun")
-	if dryRun {
-		if _, err := s.client.GetObject(r.Context(), calendar, id); err != nil {
-			s.writeError(w, r, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"dryRun":    true,
-			"deleted":   true,
-			"id":        id,
-			"calendar":  calendar,
-			"requestId": requestIDFromContext(r.Context()),
-		})
-		return
-	}
-
 	etag := strings.TrimSpace(r.Header.Get("If-Match"))
 	if etag == "" {
 		etag = strings.TrimSpace(r.URL.Query().Get("etag"))
 	}
-	if etag == "" {
-		s.writeError(w, r, errors.New("missing etag"))
-		return
-	}
-
-	if err := s.client.DeleteObject(r.Context(), calendar, id, etag); err != nil {
+	result, err := s.service.DeleteEvent(r.Context(), service.DeleteEventParams{
+		Calendar: r.URL.Query().Get("calendar"),
+		ID:       r.PathValue("id"),
+		ETag:     etag,
+		DryRun:   queryBool(r, "dryRun"),
+	})
+	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"dryRun":    false,
-		"deleted":   true,
-		"id":        id,
-		"calendar":  calendar,
+		"dryRun":    result.DryRun,
+		"deleted":   result.Deleted,
+		"id":        result.ID,
+		"calendar":  result.Calendar,
 		"requestId": requestIDFromContext(r.Context()),
 	})
 }
 
 func (s *Server) handleAvailability(w http.ResponseWriter, r *http.Request) {
-	from, to, err := events.ParseRange(r.URL.Query().Get("from"), r.URL.Query().Get("to"))
+	duration, _, err := events.ParseDurationMinutes(r.URL.Query().Get("duration_minutes"))
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	duration, hasDuration, err := events.ParseDurationMinutes(r.URL.Query().Get("duration_minutes"))
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-
-	calendar := s.resolveCalendar(r.URL.Query().Get("calendar"))
-	items, err := s.client.ListEvents(r.Context(), radicale.ListOptions{
-		Calendar: calendar,
-		From:     &from,
-		To:       &to,
-		Expand:   true,
+	result, err := s.service.Availability(r.Context(), service.AvailabilityParams{
+		Calendar:        r.URL.Query().Get("calendar"),
+		From:            r.URL.Query().Get("from"),
+		To:              r.URL.Query().Get("to"),
+		DurationMinutes: int(duration / time.Minute),
 	})
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	busy := availability.BusyIntervals(items, from, to)
-	free := []events.Interval(nil)
-	if hasDuration {
-		free = availability.FreeSlots(busy, from, to, duration)
-	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"calendar":        calendar,
-		"from":            from,
-		"to":              to,
-		"busy":            busy,
-		"free":            free,
-		"durationMinutes": int(duration / time.Minute),
+		"calendar":        result.Calendar,
+		"from":            result.From,
+		"to":              result.To,
+		"busy":            result.Busy,
+		"free":            result.Free,
+		"durationMinutes": result.DurationMinutes,
 		"requestId":       requestIDFromContext(r.Context()),
 	})
 }
 
-func (s *Server) resolveCalendar(raw string) string {
-	if value := strings.TrimSpace(raw); value != "" {
-		return value
-	}
-	return s.defaultCalendar
-}
-
 func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
-	status := http.StatusBadRequest
-	message := errorMessage(err)
-
-	switch {
-	case errors.Is(err, radicale.ErrCalendarNotFound):
-		status = http.StatusNotFound
-		message = "calendar not found"
-	case errors.Is(err, radicale.ErrEventNotFound):
-		status = http.StatusNotFound
-		message = "event not found"
-	case errors.Is(err, radicale.ErrWriteConflict):
-		status = http.StatusConflict
-		message = "write conflict"
-	case errors.Is(err, radicale.ErrRadicaleUnavailable):
-		status = http.StatusBadGateway
-		message = "radicale unavailable"
-	case errors.Is(err, events.ErrInvalidTimeRange):
-		status = http.StatusBadRequest
-		message = "invalid time range"
-	case strings.Contains(strings.ToLower(err.Error()), "internal server"):
-		status = http.StatusInternalServerError
-		message = "internal server error"
-	}
-
-	writeJSON(w, status, map[string]any{
-		"error":     message,
+	writeJSON(w, service.HTTPStatus(err), map[string]any{
+		"error":     service.PublicError(err),
 		"requestId": requestIDFromContext(r.Context()),
 	})
 }
@@ -522,41 +313,9 @@ func requestIDFromContext(ctx context.Context) string {
 	return requestID
 }
 
-func resolveWriteETag(header string, body *string) string {
-	if value := strings.TrimSpace(header); value != "" {
-		return value
-	}
-	if body == nil {
-		return ""
-	}
-	return strings.TrimSpace(*body)
-}
-
-func errorMessage(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
-}
-
 func queryBool(r *http.Request, key string) bool {
 	value := strings.TrimSpace(strings.ToLower(r.URL.Query().Get(key)))
 	return value == "1" || value == "true" || value == "yes"
-}
-
-func newObjectID(title string) (string, error) {
-	base := strings.ToLower(strings.TrimSpace(title))
-	base = slugCleaner.ReplaceAllString(base, "-")
-	base = strings.Trim(base, "-")
-	if base == "" {
-		base = "event"
-	}
-
-	buf := make([]byte, 4)
-	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("generate event id: %w", err)
-	}
-	return base + "-" + hex.EncodeToString(buf), nil
 }
 
 func randomToken(size int) string {

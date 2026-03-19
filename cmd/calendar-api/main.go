@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"log/slog"
 	"net/http"
 	"os"
@@ -11,28 +12,30 @@ import (
 	"time"
 
 	"calendar-api/internal/api"
+	"calendar-api/internal/bootstrap"
 	"calendar-api/internal/config"
-	"calendar-api/internal/radicale"
 )
 
 func main() {
-	cfg, err := config.Load()
-	if err != nil {
-		slog.Error("load config", "error", err)
-		os.Exit(1)
-	}
-
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{}))
-	client, err := radicale.NewClient(cfg, logger)
+	input := config.EnvInput()
+	flag.StringVar(&input.CalDAVBaseURL, "caldav-base-url", input.CalDAVBaseURL, "CalDAV base URL")
+	flag.StringVar(&input.CalDAVUsername, "caldav-username", input.CalDAVUsername, "CalDAV username")
+	flag.StringVar(&input.CalDAVPassword, "caldav-password", input.CalDAVPassword, "CalDAV password")
+	flag.StringVar(&input.DefaultCalendar, "calendar-default-name", input.DefaultCalendar, "Default calendar name")
+	flag.StringVar(&input.BindAddr, "api-bind-addr", input.BindAddr, "HTTP bind address")
+	flag.StringVar(&input.DefaultTimezone, "default-timezone", input.DefaultTimezone, "Default timezone")
+	flag.Parse()
+
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelStartup()
+
+	cfg, app, err := bootstrap.Build(startupCtx, input, logger)
 	if err != nil {
-		logger.Error("build radicale client", "error", err)
+		logger.Error("bootstrap calendar-api", "error", err)
 		os.Exit(1)
 	}
-	server, err := api.NewServer(cfg, client, logger)
-	if err != nil {
-		logger.Error("build API server", "error", err)
-		os.Exit(1)
-	}
+	server := api.NewServer(app, logger)
 
 	httpServer := &http.Server{
 		Addr:              cfg.BindAddr,
