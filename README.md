@@ -22,6 +22,11 @@ HTTP:
 - `PATCH /events/{id}`
 - `POST /events/{id}/move`
 - `DELETE /events/{id}`
+- `GET /todos`
+- `GET /todos/{id}`
+- `POST /todos`
+- `PATCH /todos/{id}`
+- `DELETE /todos/{id}`
 - `GET /availability`
 
 MCP tools:
@@ -32,6 +37,11 @@ MCP tools:
 - `list_upcoming_events`
 - `get_event`
 - `create_event`
+- `list_todos`
+- `get_todo`
+- `create_todo`
+- `update_todo`
+- `delete_todo`
 - `update_event`
 - `move_event`
 - `delete_event`
@@ -139,12 +149,20 @@ All responses are JSON.
 - Returns the next upcoming events from now.
 - The service queries CalDAV over increasing future windows until it has enough events or reaches a hard upper horizon.
 
+`GET /todos`:
+
+- Defaults to `CALENDAR_DEFAULT_NAME` when `calendar` is omitted.
+- Returns normalized `VTODO` items, optionally filtered by `from`, `to`, and `q`.
+
 Writes:
 
 - `POST /events`, `PATCH /events/{id}`, `POST /events/{id}/move`, and `DELETE /events/{id}` support `dryRun=true`.
+- `POST /todos`, `PATCH /todos/{id}`, and `DELETE /todos/{id}` support `dryRun=true`.
 - `PATCH`, `move`, and `DELETE` require an ETag for non-dry-run writes.
+- Todo `PATCH` and `DELETE` also require an ETag for non-dry-run writes.
 - You can supply the ETag with `If-Match`.
 - `PATCH` and `move` also accept an `etag` field in the JSON body.
+- Todo `PATCH` also accepts an `etag` field in the JSON body.
 - `DELETE` also accepts `?etag=...` as a query parameter.
 
 All-day events:
@@ -212,6 +230,19 @@ Delete an event:
 
 ```bash
 curl -s -X DELETE "http://127.0.0.1:8090/events/gemeente-bezoek?calendar=wall&etag=%22abc123%22"
+```
+
+Create a todo:
+
+```bash
+curl -s http://127.0.0.1:8090/todos \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "title": "Submit income taxes",
+    "due": "2026-04-15T18:00:00+02:00",
+    "timezone": "Europe/Paris",
+    "status": "NEEDS-ACTION"
+  }'
 ```
 
 Availability:

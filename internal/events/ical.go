@@ -12,6 +12,8 @@ import (
 
 const SourceCalDAV = "caldav"
 
+var ErrEventNotFound = errors.New("event not found")
+
 func NormalizeCalendarObject(calendarName, objectID string, data []byte, etag string, defaultLoc *time.Location) ([]Event, error) {
 	cal, err := ics.ParseCalendar(bytes.NewReader(data))
 	if err != nil {
@@ -29,7 +31,7 @@ func NormalizeCalendarObject(calendarName, objectID string, data []byte, etag st
 		}
 	}
 	if len(result) == 0 {
-		return nil, errors.New("event not found")
+		return nil, ErrEventNotFound
 	}
 	return result, nil
 }
@@ -49,10 +51,10 @@ func BuildCalendar(id string, input EventInput, now time.Time) ([]byte, error) {
 	cal.SetXWRTimezone(input.Timezone)
 
 	event := cal.AddEvent(id)
-	applyMetadata(event, input, now)
-	setTextProperty(event, ics.ComponentPropertySummary, input.Title)
-	setTextProperty(event, ics.ComponentPropertyDescription, input.Description)
-	setTextProperty(event, ics.ComponentPropertyLocation, input.Location)
+	applyComponentMetadata(&event.ComponentBase, now)
+	setTextProperty(&event.ComponentBase, ics.ComponentPropertySummary, input.Title)
+	setTextProperty(&event.ComponentBase, ics.ComponentPropertyDescription, input.Description)
+	setTextProperty(&event.ComponentBase, ics.ComponentPropertyLocation, input.Location)
 	if err := setEventWindow(event, input); err != nil {
 		return nil, err
 	}
@@ -68,13 +70,13 @@ func PatchCalendar(data []byte, input EventInput, now time.Time) ([]byte, error)
 
 	event := primaryEvent(cal)
 	if event == nil {
-		return nil, errors.New("event not found")
+		return nil, ErrEventNotFound
 	}
 
-	applyMetadata(event, input, now)
-	setTextProperty(event, ics.ComponentPropertySummary, input.Title)
-	setTextProperty(event, ics.ComponentPropertyDescription, input.Description)
-	setTextProperty(event, ics.ComponentPropertyLocation, input.Location)
+	applyComponentMetadata(&event.ComponentBase, now)
+	setTextProperty(&event.ComponentBase, ics.ComponentPropertySummary, input.Title)
+	setTextProperty(&event.ComponentBase, ics.ComponentPropertyDescription, input.Description)
+	setTextProperty(&event.ComponentBase, ics.ComponentPropertyLocation, input.Location)
 	if err := setEventWindow(event, input); err != nil {
 		return nil, err
 	}
@@ -192,13 +194,13 @@ func setEventWindow(event *ics.VEvent, input EventInput) error {
 	return nil
 }
 
-func applyMetadata(event *ics.VEvent, input EventInput, now time.Time) {
-	if propertyValue(event.ComponentBase.GetProperty(ics.ComponentPropertyCreated)) == "" {
-		event.SetCreatedTime(now.UTC())
+func applyComponentMetadata(component *ics.ComponentBase, now time.Time) {
+	if propertyValue(component.GetProperty(ics.ComponentPropertyCreated)) == "" {
+		component.SetCreatedTime(now.UTC())
 	}
-	event.SetDtStampTime(now.UTC())
-	event.SetLastModifiedAt(now.UTC())
-	event.SetSequence(nextSequence(event.ComponentBase.GetProperty(ics.ComponentPropertySequence)))
+	component.SetDtStampTime(now.UTC())
+	component.SetModifiedAt(now.UTC())
+	component.SetSequence(nextSequence(component.GetProperty(ics.ComponentPropertySequence)))
 }
 
 func nextSequence(prop *ics.IANAProperty) int {
@@ -210,12 +212,12 @@ func nextSequence(prop *ics.IANAProperty) int {
 	return current + 1
 }
 
-func setTextProperty(event *ics.VEvent, prop ics.ComponentProperty, value string) {
+func setTextProperty(component *ics.ComponentBase, prop ics.ComponentProperty, value string) {
 	if value == "" {
-		event.RemoveProperty(prop)
+		component.RemoveProperty(prop)
 		return
 	}
-	event.SetProperty(prop, value)
+	component.SetProperty(prop, value)
 }
 
 func primaryEvent(cal *ics.Calendar) *ics.VEvent {

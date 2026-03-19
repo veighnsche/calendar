@@ -45,7 +45,6 @@ type Object struct {
 	ID       string
 	ETag     string
 	Data     []byte
-	Event    events.Event
 }
 
 type ListOptions struct {
@@ -156,7 +155,7 @@ func (c *Client) ListCalendars(ctx context.Context) ([]events.Calendar, error) {
 }
 
 func (c *Client) ListEvents(ctx context.Context, opts ListOptions) ([]events.Event, error) {
-	resp, err := c.calendarQuery(ctx, opts)
+	resp, err := c.calendarQuery(ctx, opts, "VEVENT")
 	if err != nil {
 		return nil, err
 	}
@@ -170,6 +169,25 @@ func (c *Client) ListEvents(ctx context.Context, opts ListOptions) ([]events.Eve
 			return items[i].End.Before(items[j].End)
 		}
 		return items[i].Start.Before(items[j].Start)
+	})
+	if opts.Limit > 0 && len(items) > opts.Limit {
+		items = items[:opts.Limit]
+	}
+	return items, nil
+}
+
+func (c *Client) ListTodos(ctx context.Context, opts ListOptions) ([]events.Todo, error) {
+	resp, err := c.calendarQuery(ctx, opts, "VTODO")
+	if err != nil {
+		return nil, err
+	}
+	items, err := c.decodeTodos(opts.Calendar, resp)
+	if err != nil {
+		return nil, err
+	}
+	items = filterTodos(items, opts.Query)
+	sort.Slice(items, func(i, j int) bool {
+		return compareTodoSort(items[i], items[j])
 	})
 	if opts.Limit > 0 && len(items) > opts.Limit {
 		items = items[:opts.Limit]
@@ -246,16 +264,11 @@ func (c *Client) GetObject(ctx context.Context, calendarName, id string) (Object
 	if err != nil {
 		return Object{}, fmt.Errorf("%w: read upstream response", ErrCalDAVUnavailable)
 	}
-	event, err := events.NormalizeSingleEvent(calendarName, cleanObjectID(id), data, resp.Header.Get("ETag"), c.defaultLoc)
-	if err != nil {
-		return Object{}, fmt.Errorf("%w: invalid calendar data", ErrCalDAVUnavailable)
-	}
 	return Object{
 		Calendar: calendarName,
 		ID:       cleanObjectID(id),
 		ETag:     resp.Header.Get("ETag"),
 		Data:     data,
-		Event:    event,
 	}, nil
 }
 
@@ -317,8 +330,8 @@ func (c *Client) DeleteObject(ctx context.Context, calendarName, id, etag string
 	}
 }
 
-func (c *Client) calendarQuery(ctx context.Context, opts ListOptions) (multiStatus, error) {
-	body := buildCalendarQueryBody(opts.From, opts.To, opts.Expand)
+func (c *Client) calendarQuery(ctx context.Context, opts ListOptions, componentName string) (multiStatus, error) {
+	body := buildCalendarQueryBody(componentName, opts.From, opts.To, opts.Expand)
 	req, err := c.newXMLRequest(ctx, "REPORT", c.calendarURL(opts.Calendar), body)
 	if err != nil {
 		return multiStatus{}, err
@@ -356,6 +369,23 @@ func (c *Client) decodeEvents(calendarName string, response multiStatus) ([]even
 		id := lastPathSegment(res.Href)
 		id = cleanObjectID(id)
 		normalized, err := events.NormalizeCalendarObject(calendarName, id, []byte(prop.CalendarData), prop.GetETag, c.defaultLoc)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid calendar data", ErrCalDAVUnavailable)
+		}
+		items = append(items, normalized...)
+	}
+	return items, nil
+}
+
+func (c *Client) decodeTodos(calendarName string, response multiStatus) ([]events.Todo, error) {
+	items := make([]events.Todo, 0)
+	for _, res := range response.Responses {
+		prop, ok := res.okProp()
+		if !ok || strings.TrimSpace(prop.CalendarData) == "" {
+			continue
+		}
+		id := cleanObjectID(lastPathSegment(res.Href))
+		normalized, err := events.NormalizeTodoCalendarObject(calendarName, id, []byte(prop.CalendarData), prop.GetETag, c.defaultLoc)
 		if err != nil {
 			return nil, fmt.Errorf("%w: invalid calendar data", ErrCalDAVUnavailable)
 		}
@@ -420,7 +450,7 @@ func (c *Client) collectionURL(parts ...string) string {
 	return u.String()
 }
 
-func buildCalendarQueryBody(from, to *time.Time, expand bool) string {
+func buildCalendarQueryBody(componentName string, from, to *time.Time, expand bool) string {
 	var body strings.Builder
 	body.WriteString(`<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:getetag/><c:calendar-data>`)
 	if expand && from != nil && to != nil {
@@ -431,13 +461,17 @@ func buildCalendarQueryBody(from, to *time.Time, expand bool) string {
 		body.WriteString(`"/>`)
 	}
 	body.WriteString(`</c:calendar-data></d:prop>`)
+	body.WriteString(`<c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="`)
+	body.WriteString(componentName)
+	body.WriteString(`">`)
 	if from != nil && to != nil {
-		body.WriteString(`<c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT"><c:time-range start="`)
+		body.WriteString(`<c:time-range start="`)
 		body.WriteString(from.UTC().Format("20060102T150405Z"))
 		body.WriteString(`" end="`)
 		body.WriteString(to.UTC().Format("20060102T150405Z"))
-		body.WriteString(`"/></c:comp-filter></c:comp-filter></c:filter>`)
+		body.WriteString(`"/>`)
 	}
+	body.WriteString(`</c:comp-filter></c:comp-filter></c:filter>`)
 	body.WriteString(`</c:calendar-query>`)
 	return body.String()
 }
@@ -455,6 +489,58 @@ func filterEvents(items []events.Event, query string) []events.Event {
 		}
 	}
 	return filtered
+}
+
+func filterTodos(items []events.Todo, query string) []events.Todo {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return items
+	}
+	filtered := make([]events.Todo, 0, len(items))
+	for _, item := range items {
+		haystack := strings.ToLower(strings.Join([]string{
+			item.ID,
+			item.Title,
+			item.Description,
+			item.Status,
+		}, "\n"))
+		if strings.Contains(haystack, query) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func compareTodoSort(left, right events.Todo) bool {
+	if left.Completed == nil && right.Completed != nil {
+		return true
+	}
+	if left.Completed != nil && right.Completed == nil {
+		return false
+	}
+	if todoTimeBefore(left.Due, right.Due) {
+		return true
+	}
+	if todoTimeBefore(right.Due, left.Due) {
+		return false
+	}
+	if todoTimeBefore(left.Start, right.Start) {
+		return true
+	}
+	if todoTimeBefore(right.Start, left.Start) {
+		return false
+	}
+	return left.Title < right.Title
+}
+
+func todoTimeBefore(left, right *time.Time) bool {
+	if left == nil {
+		return false
+	}
+	if right == nil {
+		return true
+	}
+	return left.Before(*right)
 }
 
 func joinURLPath(base string, parts ...string) string {

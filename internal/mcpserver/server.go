@@ -21,6 +21,11 @@ type calendarService interface {
 	PatchEventWithETag(context.Context, service.PatchEventParams, string) (service.EventResult, error)
 	MoveEventWithETag(context.Context, service.MoveEventParams, string) (service.EventResult, error)
 	DeleteEvent(context.Context, service.DeleteEventParams) (service.DeleteResult, error)
+	ListTodos(context.Context, service.ListTodosParams) ([]events.Todo, error)
+	GetTodo(context.Context, service.GetTodoParams) (events.Todo, error)
+	CreateTodo(context.Context, events.CreateTodoRequest) (service.TodoResult, error)
+	PatchTodoWithETag(context.Context, service.PatchTodoParams, string) (service.TodoResult, error)
+	DeleteTodo(context.Context, service.DeleteTodoParams) (service.DeleteResult, error)
 	Availability(context.Context, service.AvailabilityParams) (service.AvailabilityResult, error)
 }
 
@@ -46,6 +51,10 @@ type listEventsOutput struct {
 	Events []events.Event `json:"events"`
 }
 
+type listTodosOutput struct {
+	Todos []events.Todo `json:"todos"`
+}
+
 type upcomingEventsInput struct {
 	Calendar string `json:"calendar,omitempty" jsonschema:"calendar name; defaults to the configured default calendar"`
 	Limit    int    `json:"limit,omitempty" jsonschema:"maximum number of upcoming events to return"`
@@ -60,6 +69,23 @@ type getEventOutput struct {
 	Event events.Event `json:"event"`
 }
 
+type listTodosInput struct {
+	Calendar string `json:"calendar,omitempty" jsonschema:"calendar name; defaults to the configured default calendar"`
+	From     string `json:"from,omitempty" jsonschema:"optional lower bound in RFC3339 format used for DTSTART/DUE filtering"`
+	To       string `json:"to,omitempty" jsonschema:"optional upper bound in RFC3339 format used for DTSTART/DUE filtering"`
+	Limit    int    `json:"limit,omitempty" jsonschema:"maximum number of todos to return"`
+	Query    string `json:"query,omitempty" jsonschema:"case-insensitive text filter for title, description, status, or id"`
+}
+
+type getTodoInput struct {
+	Calendar string `json:"calendar,omitempty" jsonschema:"calendar name; defaults to the configured default calendar"`
+	ID       string `json:"id" jsonschema:"todo identifier"`
+}
+
+type getTodoOutput struct {
+	Todo events.Todo `json:"todo"`
+}
+
 type createEventInput struct {
 	Calendar    string `json:"calendar,omitempty" jsonschema:"target calendar; defaults to the configured default calendar"`
 	Title       string `json:"title" jsonschema:"event title"`
@@ -70,6 +96,20 @@ type createEventInput struct {
 	Timezone    string `json:"timezone,omitempty" jsonschema:"IANA timezone name such as Europe/Paris"`
 	Location    string `json:"location,omitempty" jsonschema:"event location"`
 	DryRun      bool   `json:"dryRun,omitempty" jsonschema:"validate and preview without writing to CalDAV"`
+}
+
+type createTodoInput struct {
+	Calendar        string `json:"calendar,omitempty" jsonschema:"target calendar; defaults to the configured default calendar"`
+	Title           string `json:"title" jsonschema:"todo title"`
+	Description     string `json:"description,omitempty" jsonschema:"todo description"`
+	Start           string `json:"start,omitempty" jsonschema:"optional todo start time in RFC3339 format"`
+	Due             string `json:"due,omitempty" jsonschema:"optional todo due time in RFC3339 format"`
+	Completed       string `json:"completed,omitempty" jsonschema:"optional completion time in RFC3339 format"`
+	AllDay          bool   `json:"allDay,omitempty" jsonschema:"whether the todo uses all-day dates"`
+	Timezone        string `json:"timezone,omitempty" jsonschema:"IANA timezone name such as Europe/Paris"`
+	Status          string `json:"status,omitempty" jsonschema:"todo status: NEEDS-ACTION, IN-PROCESS, COMPLETED, or CANCELLED"`
+	PercentComplete *int   `json:"percentComplete,omitempty" jsonschema:"completion percentage from 0 to 100"`
+	DryRun          bool   `json:"dryRun,omitempty" jsonschema:"validate and preview without writing to CalDAV"`
 }
 
 type updateEventInput struct {
@@ -84,6 +124,22 @@ type updateEventInput struct {
 	Location    *string `json:"location,omitempty" jsonschema:"new event location"`
 	ETag        string  `json:"etag,omitempty" jsonschema:"current event etag for optimistic concurrency; fetch it with get_event before updating"`
 	DryRun      bool    `json:"dryRun,omitempty" jsonschema:"validate and preview without writing to CalDAV"`
+}
+
+type updateTodoInput struct {
+	Calendar        string  `json:"calendar,omitempty" jsonschema:"calendar name; defaults to the configured default calendar"`
+	ID              string  `json:"id" jsonschema:"todo identifier"`
+	Title           *string `json:"title,omitempty" jsonschema:"new todo title"`
+	Description     *string `json:"description,omitempty" jsonschema:"new todo description"`
+	Start           *string `json:"start,omitempty" jsonschema:"new todo start time in RFC3339 format; use an empty string to clear it"`
+	Due             *string `json:"due,omitempty" jsonschema:"new todo due time in RFC3339 format; use an empty string to clear it"`
+	Completed       *string `json:"completed,omitempty" jsonschema:"completion time in RFC3339 format; use an empty string to clear it"`
+	AllDay          *bool   `json:"allDay,omitempty" jsonschema:"whether the todo uses all-day dates"`
+	Timezone        *string `json:"timezone,omitempty" jsonschema:"IANA timezone name such as Europe/Paris"`
+	Status          *string `json:"status,omitempty" jsonschema:"todo status: NEEDS-ACTION, IN-PROCESS, COMPLETED, or CANCELLED"`
+	PercentComplete *int    `json:"percentComplete,omitempty" jsonschema:"completion percentage from 0 to 100"`
+	ETag            string  `json:"etag,omitempty" jsonschema:"current todo etag for optimistic concurrency; fetch it with get_todo before updating"`
+	DryRun          bool    `json:"dryRun,omitempty" jsonschema:"validate and preview without writing to CalDAV"`
 }
 
 type moveEventInput struct {
@@ -101,6 +157,13 @@ type deleteEventInput struct {
 	ID       string `json:"id" jsonschema:"event identifier"`
 	ETag     string `json:"etag,omitempty" jsonschema:"current event etag for optimistic concurrency; fetch it with get_event before deleting"`
 	DryRun   bool   `json:"dryRun,omitempty" jsonschema:"validate and preview without deleting the event"`
+}
+
+type deleteTodoInput struct {
+	Calendar string `json:"calendar,omitempty" jsonschema:"calendar name; defaults to the configured default calendar"`
+	ID       string `json:"id" jsonschema:"todo identifier"`
+	ETag     string `json:"etag,omitempty" jsonschema:"current todo etag for optimistic concurrency; fetch it with get_todo before deleting"`
+	DryRun   bool   `json:"dryRun,omitempty" jsonschema:"validate and preview without deleting the todo"`
 }
 
 type availabilityInput struct {
@@ -145,6 +208,26 @@ func New(service calendarService, logger *slog.Logger) *mcp.Server {
 		Name:        "create_event",
 		Description: "Create a new event in a calendar. Supports dry-run preview mode.",
 	}, h.createEvent)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_todos",
+		Description: "List normalized VTODO items, optionally filtered by time range and text query.",
+	}, h.listTodos)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "get_todo",
+		Description: "Fetch a single todo, including its current etag.",
+	}, h.getTodo)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "create_todo",
+		Description: "Create a new todo in a calendar. Supports dry-run preview mode.",
+	}, h.createTodo)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "update_todo",
+		Description: "Update an existing todo. Requires the current etag unless dryRun is true.",
+	}, h.updateTodo)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "delete_todo",
+		Description: "Delete a todo. Requires the current etag unless dryRun is true.",
+	}, h.deleteTodo)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "update_event",
 		Description: "Update an existing event. Requires the current etag unless dryRun is true.",
@@ -203,6 +286,20 @@ func (h *handler) listUpcomingEvents(ctx context.Context, _ *mcp.CallToolRequest
 	return nil, listEventsOutput{Events: items}, nil
 }
 
+func (h *handler) listTodos(ctx context.Context, _ *mcp.CallToolRequest, input listTodosInput) (*mcp.CallToolResult, listTodosOutput, error) {
+	items, err := h.service.ListTodos(ctx, service.ListTodosParams{
+		Calendar: input.Calendar,
+		From:     input.From,
+		To:       input.To,
+		Limit:    input.Limit,
+		Query:    input.Query,
+	})
+	if err != nil {
+		return nil, listTodosOutput{}, toolError(err)
+	}
+	return nil, listTodosOutput{Todos: items}, nil
+}
+
 func (h *handler) getEvent(ctx context.Context, _ *mcp.CallToolRequest, input getEventInput) (*mcp.CallToolResult, getEventOutput, error) {
 	event, err := h.service.GetEvent(ctx, service.GetEventParams{
 		Calendar: input.Calendar,
@@ -212,6 +309,17 @@ func (h *handler) getEvent(ctx context.Context, _ *mcp.CallToolRequest, input ge
 		return nil, getEventOutput{}, toolError(err)
 	}
 	return nil, getEventOutput{Event: event}, nil
+}
+
+func (h *handler) getTodo(ctx context.Context, _ *mcp.CallToolRequest, input getTodoInput) (*mcp.CallToolResult, getTodoOutput, error) {
+	todo, err := h.service.GetTodo(ctx, service.GetTodoParams{
+		Calendar: input.Calendar,
+		ID:       input.ID,
+	})
+	if err != nil {
+		return nil, getTodoOutput{}, toolError(err)
+	}
+	return nil, getTodoOutput{Todo: todo}, nil
 }
 
 func (h *handler) createEvent(ctx context.Context, _ *mcp.CallToolRequest, input createEventInput) (*mcp.CallToolResult, service.EventResult, error) {
@@ -228,6 +336,26 @@ func (h *handler) createEvent(ctx context.Context, _ *mcp.CallToolRequest, input
 	})
 	if err != nil {
 		return nil, service.EventResult{}, toolError(err)
+	}
+	return nil, result, nil
+}
+
+func (h *handler) createTodo(ctx context.Context, _ *mcp.CallToolRequest, input createTodoInput) (*mcp.CallToolResult, service.TodoResult, error) {
+	result, err := h.service.CreateTodo(ctx, events.CreateTodoRequest{
+		Calendar:        input.Calendar,
+		Title:           input.Title,
+		Description:     input.Description,
+		Start:           input.Start,
+		Due:             input.Due,
+		Completed:       input.Completed,
+		AllDay:          input.AllDay,
+		Timezone:        input.Timezone,
+		Status:          input.Status,
+		PercentComplete: input.PercentComplete,
+		DryRun:          input.DryRun,
+	})
+	if err != nil {
+		return nil, service.TodoResult{}, toolError(err)
 	}
 	return nil, result, nil
 }
@@ -249,6 +377,29 @@ func (h *handler) updateEvent(ctx context.Context, _ *mcp.CallToolRequest, input
 	}, input.ETag)
 	if err != nil {
 		return nil, service.EventResult{}, toolError(err)
+	}
+	return nil, result, nil
+}
+
+func (h *handler) updateTodo(ctx context.Context, _ *mcp.CallToolRequest, input updateTodoInput) (*mcp.CallToolResult, service.TodoResult, error) {
+	result, err := h.service.PatchTodoWithETag(ctx, service.PatchTodoParams{
+		Calendar: input.Calendar,
+		ID:       input.ID,
+		Body: events.PatchTodoRequest{
+			Title:           input.Title,
+			Description:     input.Description,
+			Start:           input.Start,
+			Due:             input.Due,
+			Completed:       input.Completed,
+			AllDay:          input.AllDay,
+			Timezone:        input.Timezone,
+			Status:          input.Status,
+			PercentComplete: input.PercentComplete,
+			DryRun:          input.DryRun,
+		},
+	}, input.ETag)
+	if err != nil {
+		return nil, service.TodoResult{}, toolError(err)
 	}
 	return nil, result, nil
 }
@@ -276,6 +427,19 @@ func (h *handler) moveEvent(ctx context.Context, _ *mcp.CallToolRequest, input m
 
 func (h *handler) deleteEvent(ctx context.Context, _ *mcp.CallToolRequest, input deleteEventInput) (*mcp.CallToolResult, service.DeleteResult, error) {
 	result, err := h.service.DeleteEvent(ctx, service.DeleteEventParams{
+		Calendar: input.Calendar,
+		ID:       input.ID,
+		ETag:     input.ETag,
+		DryRun:   input.DryRun,
+	})
+	if err != nil {
+		return nil, service.DeleteResult{}, toolError(err)
+	}
+	return nil, result, nil
+}
+
+func (h *handler) deleteTodo(ctx context.Context, _ *mcp.CallToolRequest, input deleteTodoInput) (*mcp.CallToolResult, service.DeleteResult, error) {
+	result, err := h.service.DeleteTodo(ctx, service.DeleteTodoParams{
 		Calendar: input.Calendar,
 		ID:       input.ID,
 		ETag:     input.ETag,

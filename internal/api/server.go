@@ -44,6 +44,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /events/{id}", s.handlePatchEvent)
 	mux.HandleFunc("POST /events/{id}/move", s.handleMoveEvent)
 	mux.HandleFunc("DELETE /events/{id}", s.handleDeleteEvent)
+	mux.HandleFunc("GET /todos", s.handleTodos)
+	mux.HandleFunc("GET /todos/{id}", s.handleGetTodo)
+	mux.HandleFunc("POST /todos", s.handleCreateTodo)
+	mux.HandleFunc("PATCH /todos/{id}", s.handlePatchTodo)
+	mux.HandleFunc("DELETE /todos/{id}", s.handleDeleteTodo)
 	mux.HandleFunc("GET /availability", s.handleAvailability)
 	return s.requestIDMiddleware(s.loggingMiddleware(mux))
 }
@@ -207,6 +212,115 @@ func (s *Server) handleDeleteEvent(w http.ResponseWriter, r *http.Request) {
 		etag = strings.TrimSpace(r.URL.Query().Get("etag"))
 	}
 	result, err := s.service.DeleteEvent(r.Context(), service.DeleteEventParams{
+		Calendar: r.URL.Query().Get("calendar"),
+		ID:       r.PathValue("id"),
+		ETag:     etag,
+		DryRun:   queryBool(r, "dryRun"),
+	})
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"dryRun":    result.DryRun,
+		"deleted":   result.Deleted,
+		"id":        result.ID,
+		"calendar":  result.Calendar,
+		"requestId": requestIDFromContext(r.Context()),
+	})
+}
+
+func (s *Server) handleTodos(w http.ResponseWriter, r *http.Request) {
+	limit, err := events.ParseLimit(r.URL.Query().Get("limit"), 100, 500)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	items, err := s.service.ListTodos(r.Context(), service.ListTodosParams{
+		Calendar: r.URL.Query().Get("calendar"),
+		From:     r.URL.Query().Get("from"),
+		To:       r.URL.Query().Get("to"),
+		Limit:    limit,
+		Query:    r.URL.Query().Get("q"),
+	})
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"todos":     items,
+		"requestId": requestIDFromContext(r.Context()),
+	})
+}
+
+func (s *Server) handleGetTodo(w http.ResponseWriter, r *http.Request) {
+	item, err := s.service.GetTodo(r.Context(), service.GetTodoParams{
+		Calendar: r.URL.Query().Get("calendar"),
+		ID:       r.PathValue("id"),
+	})
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"todo":      item,
+		"requestId": requestIDFromContext(r.Context()),
+	})
+}
+
+func (s *Server) handleCreateTodo(w http.ResponseWriter, r *http.Request) {
+	var req events.CreateTodoRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	req.DryRun = req.DryRun || queryBool(r, "dryRun")
+	item, err := s.service.CreateTodo(r.Context(), req)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	status := http.StatusCreated
+	if item.DryRun {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, map[string]any{
+		"dryRun":    item.DryRun,
+		"todo":      item.Todo,
+		"requestId": requestIDFromContext(r.Context()),
+	})
+}
+
+func (s *Server) handlePatchTodo(w http.ResponseWriter, r *http.Request) {
+	var req events.PatchTodoRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	req.DryRun = req.DryRun || queryBool(r, "dryRun")
+	item, err := s.service.PatchTodoWithETag(r.Context(), service.PatchTodoParams{
+		Calendar: r.URL.Query().Get("calendar"),
+		ID:       r.PathValue("id"),
+		Body:     req,
+	}, r.Header.Get("If-Match"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"dryRun":    item.DryRun,
+		"todo":      item.Todo,
+		"requestId": requestIDFromContext(r.Context()),
+	})
+}
+
+func (s *Server) handleDeleteTodo(w http.ResponseWriter, r *http.Request) {
+	etag := strings.TrimSpace(r.Header.Get("If-Match"))
+	if etag == "" {
+		etag = strings.TrimSpace(r.URL.Query().Get("etag"))
+	}
+	result, err := s.service.DeleteTodo(r.Context(), service.DeleteTodoParams{
 		Calendar: r.URL.Query().Get("calendar"),
 		ID:       r.PathValue("id"),
 		ETag:     etag,

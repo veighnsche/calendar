@@ -20,6 +20,8 @@ import (
 
 var slugCleaner = regexp.MustCompile(`[^a-z0-9]+`)
 
+var ErrTodoNotFound = errors.New("todo not found")
+
 type Service struct {
 	client          *caldav.Client
 	logger          *slog.Logger
@@ -40,7 +42,20 @@ type UpcomingEventsParams struct {
 	Limit    int
 }
 
+type ListTodosParams struct {
+	Calendar string
+	From     string
+	To       string
+	Limit    int
+	Query    string
+}
+
 type GetEventParams struct {
+	Calendar string
+	ID       string
+}
+
+type GetTodoParams struct {
 	Calendar string
 	ID       string
 }
@@ -51,6 +66,12 @@ type PatchEventParams struct {
 	Body     events.PatchRequest
 }
 
+type PatchTodoParams struct {
+	Calendar string
+	ID       string
+	Body     events.PatchTodoRequest
+}
+
 type MoveEventParams struct {
 	Calendar string
 	ID       string
@@ -58,6 +79,13 @@ type MoveEventParams struct {
 }
 
 type DeleteEventParams struct {
+	Calendar string
+	ID       string
+	ETag     string
+	DryRun   bool
+}
+
+type DeleteTodoParams struct {
 	Calendar string
 	ID       string
 	ETag     string
@@ -85,6 +113,11 @@ type HealthUpstream struct {
 type EventResult struct {
 	DryRun bool         `json:"dryRun"`
 	Event  events.Event `json:"event"`
+}
+
+type TodoResult struct {
+	DryRun bool        `json:"dryRun"`
+	Todo   events.Todo `json:"todo"`
 }
 
 type DeleteResult struct {
@@ -174,12 +207,45 @@ func (s *Service) UpcomingEvents(ctx context.Context, params UpcomingEventsParam
 	return s.client.UpcomingEvents(ctx, s.resolveCalendar(params.Calendar), limit)
 }
 
+func (s *Service) ListTodos(ctx context.Context, params ListTodosParams) ([]events.Todo, error) {
+	limit, err := clampLimit(params.Limit, 100, 500)
+	if err != nil {
+		return nil, err
+	}
+
+	var from, to *time.Time
+	if strings.TrimSpace(params.From) != "" || strings.TrimSpace(params.To) != "" {
+		parsedFrom, parsedTo, err := events.ParseRange(params.From, params.To)
+		if err != nil {
+			return nil, err
+		}
+		from = &parsedFrom
+		to = &parsedTo
+	}
+
+	return s.client.ListTodos(ctx, caldav.ListOptions{
+		Calendar: s.resolveCalendar(params.Calendar),
+		From:     from,
+		To:       to,
+		Limit:    limit,
+		Query:    params.Query,
+	})
+}
+
 func (s *Service) GetEvent(ctx context.Context, params GetEventParams) (events.Event, error) {
 	object, err := s.client.GetObject(ctx, s.resolveCalendar(params.Calendar), params.ID)
 	if err != nil {
-		return events.Event{}, err
+		return events.Event{}, mapEventLookupError(err)
 	}
-	return object.Event, nil
+	return s.normalizeEventObject(object)
+}
+
+func (s *Service) GetTodo(ctx context.Context, params GetTodoParams) (events.Todo, error) {
+	object, err := s.client.GetObject(ctx, s.resolveCalendar(params.Calendar), params.ID)
+	if err != nil {
+		return events.Todo{}, mapTodoLookupError(err)
+	}
+	return s.normalizeTodoObject(object)
 }
 
 func (s *Service) CreateEvent(ctx context.Context, req events.CreateRequest) (EventResult, error) {
@@ -207,17 +273,59 @@ func (s *Service) CreateEvent(ctx context.Context, req events.CreateRequest) (Ev
 	if err != nil {
 		return EventResult{}, err
 	}
-	return EventResult{DryRun: false, Event: item.Event}, nil
+	event, err := s.normalizeEventObject(item)
+	if err != nil {
+		return EventResult{}, err
+	}
+	return EventResult{DryRun: false, Event: event}, nil
+}
+
+func (s *Service) CreateTodo(ctx context.Context, req events.CreateTodoRequest) (TodoResult, error) {
+	input, err := events.ValidateCreateTodo(req, s.defaultCalendar, s.defaultLoc)
+	if err != nil {
+		return TodoResult{}, err
+	}
+	input = events.FinalizeTodo(input, time.Now())
+
+	id, err := newObjectID(input.Title)
+	if err != nil {
+		return TodoResult{}, err
+	}
+	data, err := events.BuildTodoCalendar(id, input, time.Now())
+	if err != nil {
+		return TodoResult{}, err
+	}
+	if req.DryRun {
+		todo, err := events.NormalizeSingleTodo(input.Calendar, id, data, "", s.defaultLoc)
+		if err != nil {
+			return TodoResult{}, err
+		}
+		return TodoResult{DryRun: true, Todo: todo}, nil
+	}
+
+	item, err := s.client.PutObject(ctx, input.Calendar, id, data, "", true)
+	if err != nil {
+		return TodoResult{}, err
+	}
+	todo, err := s.normalizeTodoObject(item)
+	if err != nil {
+		return TodoResult{}, err
+	}
+	return TodoResult{DryRun: false, Todo: todo}, nil
 }
 
 func (s *Service) PatchEvent(ctx context.Context, params PatchEventParams) (EventResult, error) {
 	calendar := s.resolveCalendar(params.Calendar)
 	object, err := s.client.GetObject(ctx, calendar, params.ID)
 	if err != nil {
+		return EventResult{}, mapEventLookupError(err)
+	}
+	current, err := s.normalizeEventObject(object)
+	if err != nil {
 		return EventResult{}, err
 	}
 
-	input, err := events.ValidatePatch(object.Event, params.Body, s.defaultLoc)
+	input, err := events.ValidatePatch(current, params.Body, s.defaultLoc)
 	if err != nil {
 		return EventResult{}, err
 	}
@@ -242,7 +350,11 @@ func (s *Service) PatchEvent(ctx context.Context, params PatchEventParams) (Even
 	if err != nil {
 		return EventResult{}, err
 	}
-	return EventResult{DryRun: false, Event: item.Event}, nil
+	event, err := s.normalizeEventObject(item)
+	if err != nil {
+		return EventResult{}, err
+	}
+	return EventResult{DryRun: false, Event: event}, nil
 }
 
 func (s *Service) PatchEventWithETag(ctx context.Context, params PatchEventParams, etag string) (EventResult, error) {
@@ -250,14 +362,67 @@ func (s *Service) PatchEventWithETag(ctx context.Context, params PatchEventParam
 	return s.PatchEvent(ctx, params)
 }
 
+func (s *Service) PatchTodo(ctx context.Context, params PatchTodoParams) (TodoResult, error) {
+	calendar := s.resolveCalendar(params.Calendar)
+	object, err := s.client.GetObject(ctx, calendar, params.ID)
+	if err != nil {
+		return TodoResult{}, mapTodoLookupError(err)
+	}
+	current, err := s.normalizeTodoObject(object)
+	if err != nil {
+		return TodoResult{}, err
+	}
+
+	input, err := events.ValidatePatchTodo(current, params.Body, s.defaultLoc)
+	if err != nil {
+		return TodoResult{}, err
+	}
+	input = events.FinalizeTodo(input, time.Now())
+	data, err := events.PatchTodoCalendar(object.Data, input, time.Now())
+	if err != nil {
+		return TodoResult{}, err
+	}
+
+	if params.Body.DryRun {
+		todo, err := events.NormalizeSingleTodo(calendar, object.ID, data, object.ETag, s.defaultLoc)
+		if err != nil {
+			return TodoResult{}, err
+		}
+		return TodoResult{DryRun: true, Todo: todo}, nil
+	}
+
+	etag := strings.TrimSpace(resolveWriteETag("", params.Body.ETag))
+	if etag == "" {
+		return TodoResult{}, errors.New("missing etag")
+	}
+	item, err := s.client.PutObject(ctx, calendar, object.ID, data, etag, false)
+	if err != nil {
+		return TodoResult{}, err
+	}
+	todo, err := s.normalizeTodoObject(item)
+	if err != nil {
+		return TodoResult{}, err
+	}
+	return TodoResult{DryRun: false, Todo: todo}, nil
+}
+
+func (s *Service) PatchTodoWithETag(ctx context.Context, params PatchTodoParams, etag string) (TodoResult, error) {
+	params.Body.ETag = stringPtr(firstNonEmpty(etag, valueOrEmpty(params.Body.ETag)))
+	return s.PatchTodo(ctx, params)
+}
+
 func (s *Service) MoveEvent(ctx context.Context, params MoveEventParams) (EventResult, error) {
 	calendar := s.resolveCalendar(params.Calendar)
 	object, err := s.client.GetObject(ctx, calendar, params.ID)
 	if err != nil {
+		return EventResult{}, mapEventLookupError(err)
+	}
+	current, err := s.normalizeEventObject(object)
+	if err != nil {
 		return EventResult{}, err
 	}
 
-	input, targetCalendar, err := events.ValidateMove(object.Event, params.Body, s.defaultLoc)
+	input, targetCalendar, err := events.ValidateMove(current, params.Body, s.defaultLoc)
 	if err != nil {
 		return EventResult{}, err
 	}
@@ -284,7 +449,11 @@ func (s *Service) MoveEvent(ctx context.Context, params MoveEventParams) (EventR
 		if err != nil {
 			return EventResult{}, err
 		}
-		return EventResult{DryRun: false, Event: item.Event}, nil
+		event, err := s.normalizeEventObject(item)
+		if err != nil {
+			return EventResult{}, err
+		}
+		return EventResult{DryRun: false, Event: event}, nil
 	}
 
 	item, err := s.client.PutObject(ctx, targetCalendar, object.ID, data, "", true)
@@ -297,7 +466,11 @@ func (s *Service) MoveEvent(ctx context.Context, params MoveEventParams) (EventR
 		}
 		return EventResult{}, err
 	}
-	return EventResult{DryRun: false, Event: item.Event}, nil
+	event, err := s.normalizeEventObject(item)
+	if err != nil {
+		return EventResult{}, err
+	}
+	return EventResult{DryRun: false, Event: event}, nil
 }
 
 func (s *Service) MoveEventWithETag(ctx context.Context, params MoveEventParams, etag string) (EventResult, error) {
@@ -307,10 +480,14 @@ func (s *Service) MoveEventWithETag(ctx context.Context, params MoveEventParams,
 
 func (s *Service) DeleteEvent(ctx context.Context, params DeleteEventParams) (DeleteResult, error) {
 	calendar := s.resolveCalendar(params.Calendar)
+	object, err := s.client.GetObject(ctx, calendar, params.ID)
+	if err != nil {
+		return DeleteResult{}, mapEventLookupError(err)
+	}
+	if _, err := s.normalizeEventObject(object); err != nil {
+		return DeleteResult{}, err
+	}
 	if params.DryRun {
-		if _, err := s.client.GetObject(ctx, calendar, params.ID); err != nil {
-			return DeleteResult{}, err
-		}
 		return DeleteResult{
 			DryRun:   true,
 			Deleted:  true,
@@ -322,7 +499,39 @@ func (s *Service) DeleteEvent(ctx context.Context, params DeleteEventParams) (De
 	if strings.TrimSpace(params.ETag) == "" {
 		return DeleteResult{}, errors.New("missing etag")
 	}
-	if err := s.client.DeleteObject(ctx, calendar, params.ID, strings.TrimSpace(params.ETag)); err != nil {
+	if err := s.client.DeleteObject(ctx, calendar, object.ID, strings.TrimSpace(params.ETag)); err != nil {
+		return DeleteResult{}, err
+	}
+	return DeleteResult{
+		DryRun:   false,
+		Deleted:  true,
+		ID:       params.ID,
+		Calendar: calendar,
+	}, nil
+}
+
+func (s *Service) DeleteTodo(ctx context.Context, params DeleteTodoParams) (DeleteResult, error) {
+	calendar := s.resolveCalendar(params.Calendar)
+	object, err := s.client.GetObject(ctx, calendar, params.ID)
+	if err != nil {
+		return DeleteResult{}, mapTodoLookupError(err)
+	}
+	if _, err := s.normalizeTodoObject(object); err != nil {
+		return DeleteResult{}, err
+	}
+	if params.DryRun {
+		return DeleteResult{
+			DryRun:   true,
+			Deleted:  true,
+			ID:       params.ID,
+			Calendar: calendar,
+		}, nil
+	}
+
+	if strings.TrimSpace(params.ETag) == "" {
+		return DeleteResult{}, errors.New("missing etag")
+	}
+	if err := s.client.DeleteObject(ctx, calendar, object.ID, strings.TrimSpace(params.ETag)); err != nil {
 		return DeleteResult{}, err
 	}
 	return DeleteResult{
@@ -379,6 +588,8 @@ func PublicError(err error) string {
 		return "calendar not found"
 	case errors.Is(err, caldav.ErrEventNotFound):
 		return "event not found"
+	case errors.Is(err, ErrTodoNotFound):
+		return "todo not found"
 	case errors.Is(err, caldav.ErrWriteConflict):
 		return "write conflict"
 	case errors.Is(err, caldav.ErrCalDAVUnavailable):
@@ -396,7 +607,7 @@ func HTTPStatus(err error) int {
 	switch {
 	case err == nil:
 		return http.StatusOK
-	case errors.Is(err, caldav.ErrCalendarNotFound), errors.Is(err, caldav.ErrEventNotFound):
+	case errors.Is(err, caldav.ErrCalendarNotFound), errors.Is(err, caldav.ErrEventNotFound), errors.Is(err, ErrTodoNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, caldav.ErrWriteConflict):
 		return http.StatusConflict
@@ -486,4 +697,40 @@ func stringPtr(value string) *string {
 	}
 	v := strings.TrimSpace(value)
 	return &v
+}
+
+func (s *Service) normalizeEventObject(object caldav.Object) (events.Event, error) {
+	event, err := events.NormalizeSingleEvent(object.Calendar, object.ID, object.Data, object.ETag, s.defaultLoc)
+	if err == nil {
+		return event, nil
+	}
+	if errors.Is(err, events.ErrEventNotFound) {
+		return events.Event{}, caldav.ErrEventNotFound
+	}
+	return events.Event{}, fmt.Errorf("%w: invalid calendar data", caldav.ErrCalDAVUnavailable)
+}
+
+func (s *Service) normalizeTodoObject(object caldav.Object) (events.Todo, error) {
+	todo, err := events.NormalizeSingleTodo(object.Calendar, object.ID, object.Data, object.ETag, s.defaultLoc)
+	if err == nil {
+		return todo, nil
+	}
+	if errors.Is(err, events.ErrTodoNotFound) {
+		return events.Todo{}, ErrTodoNotFound
+	}
+	return events.Todo{}, fmt.Errorf("%w: invalid calendar data", caldav.ErrCalDAVUnavailable)
+}
+
+func mapEventLookupError(err error) error {
+	if errors.Is(err, caldav.ErrEventNotFound) {
+		return caldav.ErrEventNotFound
+	}
+	return err
+}
+
+func mapTodoLookupError(err error) error {
+	if errors.Is(err, caldav.ErrEventNotFound) {
+		return ErrTodoNotFound
+	}
+	return err
 }

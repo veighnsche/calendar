@@ -28,3 +28,19 @@ func TestParseRangeRejectsInvalidWindow(t *testing.T) {
 		t.Fatalf("expected invalid time range, got %v", err)
 	}
 }
+
+func TestValidateCreateTodoRejectsInvalidPercent(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/Paris")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+
+	percent := 101
+	_, err = ValidateCreateTodo(CreateTodoRequest{
+		Title:           "Taxes",
+		PercentComplete: &percent,
+	}, "wall", loc)
+	if err == nil || err.Error() != "invalid percentComplete" {
+		t.Fatalf("expected invalid percentComplete, got %v", err)
+	}
+}

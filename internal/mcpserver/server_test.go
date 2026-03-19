@@ -39,11 +39,14 @@ func TestServerRegistersToolsAndHandlesCreateEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list tools: %v", err)
 	}
-	if len(tools.Tools) != 10 {
-		t.Fatalf("expected 10 tools, got %d", len(tools.Tools))
+	if len(tools.Tools) != 15 {
+		t.Fatalf("expected 15 tools, got %d", len(tools.Tools))
 	}
 	if !hasTool(tools.Tools, "create_event") {
 		t.Fatalf("expected create_event tool in %#v", tools.Tools)
+	}
+	if !hasTool(tools.Tools, "create_todo") {
+		t.Fatalf("expected create_todo tool in %#v", tools.Tools)
 	}
 
 	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
@@ -83,11 +86,47 @@ func TestServerRegistersToolsAndHandlesCreateEvent(t *testing.T) {
 	if !stub.lastCreate.DryRun {
 		t.Fatalf("expected dryRun request, got %#v", stub.lastCreate)
 	}
+
+	todoResult, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+		Name: "create_todo",
+		Arguments: map[string]any{
+			"title":    "File taxes",
+			"due":      "2026-04-15T00:00:00+02:00",
+			"timezone": "Europe/Paris",
+			"dryRun":   true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("call create_todo tool: %v", err)
+	}
+	if todoResult.IsError {
+		t.Fatalf("expected successful todo result, got error content %#v", todoResult.Content)
+	}
+
+	var structuredTodo service.TodoResult
+	rawTodo, err := json.Marshal(todoResult.StructuredContent)
+	if err != nil {
+		t.Fatalf("marshal todo structured content: %v", err)
+	}
+	if err := json.Unmarshal(rawTodo, &structuredTodo); err != nil {
+		t.Fatalf("unmarshal todo structured content: %v", err)
+	}
+	if !structuredTodo.DryRun {
+		t.Fatal("expected dryRun todo result")
+	}
+	if structuredTodo.Todo.Title != "File taxes" {
+		t.Fatalf("unexpected todo title: %#v", structuredTodo.Todo)
+	}
+	if !stub.todoCreated {
+		t.Fatal("expected stub CreateTodo to be called")
+	}
 }
 
 type stubService struct {
-	created    bool
-	lastCreate events.CreateRequest
+	created     bool
+	todoCreated bool
+	lastCreate  events.CreateRequest
+	lastTodo    events.CreateTodoRequest
 }
 
 func (s *stubService) Health(context.Context) (service.HealthResult, error) {
@@ -134,8 +173,44 @@ func (s *stubService) CreateEvent(_ context.Context, req events.CreateRequest) (
 	}, nil
 }
 
+func (s *stubService) ListTodos(context.Context, service.ListTodosParams) ([]events.Todo, error) {
+	return nil, nil
+}
+
+func (s *stubService) GetTodo(context.Context, service.GetTodoParams) (events.Todo, error) {
+	return events.Todo{}, errors.New("todo not found")
+}
+
+func (s *stubService) CreateTodo(_ context.Context, req events.CreateTodoRequest) (service.TodoResult, error) {
+	s.todoCreated = true
+	s.lastTodo = req
+
+	var due *time.Time
+	if req.Due != "" {
+		parsedDue, _ := time.Parse(time.RFC3339, req.Due)
+		due = &parsedDue
+	}
+	return service.TodoResult{
+		DryRun: req.DryRun,
+		Todo: events.Todo{
+			ID:              "file-taxes-1234",
+			Calendar:        "wall",
+			Title:           req.Title,
+			Due:             due,
+			Timezone:        req.Timezone,
+			Status:          events.TodoStatusNeedsAction,
+			PercentComplete: 0,
+			Source:          events.SourceCalDAV,
+		},
+	}, nil
+}
+
 func (s *stubService) PatchEventWithETag(context.Context, service.PatchEventParams, string) (service.EventResult, error) {
 	return service.EventResult{}, errors.New("not implemented")
+}
+
+func (s *stubService) PatchTodoWithETag(context.Context, service.PatchTodoParams, string) (service.TodoResult, error) {
+	return service.TodoResult{}, errors.New("not implemented")
 }
 
 func (s *stubService) MoveEventWithETag(context.Context, service.MoveEventParams, string) (service.EventResult, error) {
@@ -143,6 +218,10 @@ func (s *stubService) MoveEventWithETag(context.Context, service.MoveEventParams
 }
 
 func (s *stubService) DeleteEvent(context.Context, service.DeleteEventParams) (service.DeleteResult, error) {
+	return service.DeleteResult{}, errors.New("not implemented")
+}
+
+func (s *stubService) DeleteTodo(context.Context, service.DeleteTodoParams) (service.DeleteResult, error) {
 	return service.DeleteResult{}, errors.New("not implemented")
 }
 
