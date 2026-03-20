@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -470,7 +472,12 @@ func requireLiveConfig(t *testing.T) config.Config {
 func ensureCalendarExists(t *testing.T, cfg config.Config) {
 	t.Helper()
 
-	req, err := http.NewRequest("MKCALENDAR", fmt.Sprintf("%s/%s/%s/", strings.TrimRight(cfg.CalDAVBaseURL, "/"), cfg.CalDAVUsername, cfg.DefaultCalendar), strings.NewReader(`<C:mkcalendar xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:set><D:prop><D:displayname>Calendar API Test</D:displayname><C:supported-calendar-component-set><C:comp name="VEVENT"/></C:supported-calendar-component-set></D:prop></D:set></C:mkcalendar>`))
+	if _, ok := discoverCalendarCollectionURL(t, cfg, cfg.DefaultCalendar); ok {
+		return
+	}
+
+	homeSetURL := discoverCalendarHomeSetURL(t, cfg)
+	req, err := http.NewRequest("MKCALENDAR", joinCollectionURL(t, homeSetURL, cfg.DefaultCalendar), strings.NewReader(fmt.Sprintf(`<C:mkcalendar xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:set><D:prop><D:displayname>%s</D:displayname><C:supported-calendar-component-set><C:comp name="VEVENT"/></C:supported-calendar-component-set></D:prop></D:set></C:mkcalendar>`, cfg.DefaultCalendar)))
 	if err != nil {
 		t.Fatalf("new MKCALENDAR request: %v", err)
 	}
@@ -598,7 +605,12 @@ func freeBindAddr(t *testing.T) string {
 func assertCalDAVObjectExists(t *testing.T, cfg config.Config, calendar, id string) {
 	t.Helper()
 
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/%s/%s/%s.ics", strings.TrimRight(cfg.CalDAVBaseURL, "/"), cfg.CalDAVUsername, calendar, id), nil)
+	collectionURL, ok := discoverCalendarCollectionURL(t, cfg, calendar)
+	if !ok {
+		t.Fatalf("calendar %q not found", calendar)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, joinCollectionURL(t, collectionURL, id+".ics"), nil)
 	if err != nil {
 		t.Fatalf("new caldav GET request: %v", err)
 	}
@@ -619,7 +631,12 @@ func assertCalDAVObjectExists(t *testing.T, cfg config.Config, calendar, id stri
 func assertCalDAVObjectMissing(t *testing.T, cfg config.Config, calendar, id string) {
 	t.Helper()
 
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/%s/%s/%s.ics", strings.TrimRight(cfg.CalDAVBaseURL, "/"), cfg.CalDAVUsername, calendar, id), nil)
+	collectionURL, ok := discoverCalendarCollectionURL(t, cfg, calendar)
+	if !ok {
+		return
+	}
+
+	req, err := http.NewRequest(http.MethodGet, joinCollectionURL(t, collectionURL, id+".ics"), nil)
 	if err != nil {
 		t.Fatalf("new caldav GET request: %v", err)
 	}
@@ -702,7 +719,7 @@ func decodeStructured(t *testing.T, raw any, target any) {
 
 func containsCalendar(items []events.Calendar, name string) bool {
 	for _, item := range items {
-		if item.Name == name {
+		if strings.EqualFold(item.Name, name) || strings.EqualFold(item.DisplayName, name) {
 			return true
 		}
 	}
@@ -734,4 +751,186 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func discoverCalendarCollectionURL(t *testing.T, cfg config.Config, calendar string) (string, bool) {
+	t.Helper()
+
+	result := caldavPropfind(
+		t,
+		cfg,
+		discoverCalendarHomeSetURL(t, cfg),
+		"1",
+		`<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:displayname/><d:resourcetype/></d:prop></d:propfind>`,
+	)
+
+	key := strings.ToLower(strings.TrimSpace(calendar))
+	for _, res := range result.Responses {
+		prop, ok := res.okProp()
+		if !ok || prop.ResourceType.Calendar == nil {
+			continue
+		}
+
+		rawName := lastPathSegment(res.Href)
+		displayName := strings.TrimSpace(prop.DisplayName)
+		if strings.EqualFold(rawName, key) || strings.EqualFold(displayName, key) {
+			return absoluteURL(t, cfg, res.Href), true
+		}
+	}
+	return "", false
+}
+
+func discoverCalendarHomeSetURL(t *testing.T, cfg config.Config) string {
+	t.Helper()
+
+	principalResult := caldavPropfind(
+		t,
+		cfg,
+		strings.TrimRight(cfg.CalDAVBaseURL, "/"),
+		"0",
+		`<d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/></d:prop></d:propfind>`,
+	)
+
+	principalURL := ""
+	for _, res := range principalResult.Responses {
+		prop, ok := res.okProp()
+		if !ok || prop.CurrentUserPrincipal == nil || strings.TrimSpace(prop.CurrentUserPrincipal.Href) == "" {
+			continue
+		}
+		principalURL = absoluteURL(t, cfg, prop.CurrentUserPrincipal.Href)
+		break
+	}
+	if principalURL == "" {
+		t.Fatal("current-user-principal not found")
+	}
+
+	homeSetResult := caldavPropfind(
+		t,
+		cfg,
+		principalURL,
+		"0",
+		`<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-home-set/></d:prop></d:propfind>`,
+	)
+
+	for _, res := range homeSetResult.Responses {
+		prop, ok := res.okProp()
+		if !ok || prop.CalendarHomeSet == nil || strings.TrimSpace(prop.CalendarHomeSet.Href) == "" {
+			continue
+		}
+		return absoluteURL(t, cfg, prop.CalendarHomeSet.Href)
+	}
+
+	t.Fatal("calendar-home-set not found")
+	return ""
+}
+
+func caldavPropfind(t *testing.T, cfg config.Config, rawURL, depth, body string) liveMultiStatus {
+	t.Helper()
+
+	req, err := http.NewRequest("PROPFIND", rawURL, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new PROPFIND request: %v", err)
+	}
+	req.SetBasicAuth(cfg.CalDAVUsername, cfg.CalDAVPassword)
+	req.Header.Set("Depth", depth)
+	req.Header.Set("Content-Type", "application/xml; charset=utf-8")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do PROPFIND request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusMultiStatus {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected PROPFIND status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+
+	var result liveMultiStatus
+	if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode PROPFIND response: %v", err)
+	}
+	return result
+}
+
+func absoluteURL(t *testing.T, cfg config.Config, raw string) string {
+	t.Helper()
+
+	base, err := url.Parse(strings.TrimRight(cfg.CalDAVBaseURL, "/") + "/")
+	if err != nil {
+		t.Fatalf("parse CalDAV base URL: %v", err)
+	}
+	ref, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		t.Fatalf("parse CalDAV reference URL: %v", err)
+	}
+	return base.ResolveReference(ref).String()
+}
+
+func joinCollectionURL(t *testing.T, baseURL string, name string) string {
+	t.Helper()
+
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		t.Fatalf("parse collection URL: %v", err)
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/" + url.PathEscape(strings.TrimSpace(name))
+	return u.String()
+}
+
+func lastPathSegment(raw string) string {
+	u, err := url.Parse(raw)
+	if err == nil {
+		raw = u.Path
+	}
+	raw = strings.TrimSuffix(raw, "/")
+	parts := strings.Split(raw, "/")
+	if len(parts) == 0 {
+		return ""
+	}
+	segment := parts[len(parts)-1]
+	decoded, err := url.PathUnescape(segment)
+	if err != nil {
+		return segment
+	}
+	return decoded
+}
+
+type liveMultiStatus struct {
+	Responses []liveResponse `xml:"response"`
+}
+
+type liveResponse struct {
+	Href     string         `xml:"href"`
+	PropStat []livePropStat `xml:"propstat"`
+}
+
+type livePropStat struct {
+	Status string   `xml:"status"`
+	Prop   liveProp `xml:"prop"`
+}
+
+type liveProp struct {
+	DisplayName          string            `xml:"displayname"`
+	ResourceType         liveResourceType  `xml:"resourcetype"`
+	CurrentUserPrincipal *liveHrefProperty `xml:"current-user-principal"`
+	CalendarHomeSet      *liveHrefProperty `xml:"calendar-home-set"`
+}
+
+type liveResourceType struct {
+	Collection *struct{} `xml:"collection"`
+	Calendar   *struct{} `xml:"calendar"`
+}
+
+type liveHrefProperty struct {
+	Href string `xml:"href"`
+}
+
+func (r liveResponse) okProp() (liveProp, bool) {
+	for _, ps := range r.PropStat {
+		if strings.Contains(ps.Status, " 200 ") {
+			return ps.Prop, true
+		}
+	}
+	return liveProp{}, false
 }

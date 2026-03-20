@@ -2,12 +2,14 @@ package mcpserver
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -21,8 +23,78 @@ func TestCalendarAPIMCPBinarySupportsCommandTransport(t *testing.T) {
 			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
 			return
 		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read body", http.StatusInternalServerError)
+			return
+		}
+
 		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 		w.WriteHeader(http.StatusMultiStatus)
+		switch {
+		case r.URL.Path == "/" && strings.Contains(string(body), "current-user-principal"):
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<multistatus xmlns="DAV:">
+  <response>
+    <href>/</href>
+    <propstat>
+      <prop>
+        <current-user-principal>
+          <href>/principals/vince/</href>
+        </current-user-principal>
+      </prop>
+      <status>HTTP/1.1 200 OK</status>
+    </propstat>
+  </response>
+</multistatus>`))
+		case r.URL.Path == "/principals/vince/" && strings.Contains(string(body), "calendar-home-set"):
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<multistatus xmlns="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <response>
+    <href>/principals/vince/</href>
+    <propstat>
+      <prop>
+        <c:calendar-home-set>
+          <href>/calendars/</href>
+        </c:calendar-home-set>
+      </prop>
+      <status>HTTP/1.1 200 OK</status>
+    </propstat>
+  </response>
+</multistatus>`))
+		case r.URL.Path == "/calendars/":
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<multistatus xmlns="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <response>
+    <href>/calendars/</href>
+    <propstat>
+      <prop>
+        <displayname>Calendars</displayname>
+        <resourcetype>
+          <collection />
+        </resourcetype>
+      </prop>
+      <status>HTTP/1.1 200 OK</status>
+    </propstat>
+  </response>
+  <response>
+    <href>/calendars/wall/</href>
+    <propstat>
+      <prop>
+        <displayname>Wall</displayname>
+        <resourcetype>
+          <collection />
+          <c:calendar />
+        </resourcetype>
+      </prop>
+      <status>HTTP/1.1 200 OK</status>
+    </propstat>
+  </response>
+</multistatus>`))
+		default:
+			http.Error(w, "unexpected path", http.StatusNotFound)
+		}
 	}))
 	defer upstream.Close()
 
